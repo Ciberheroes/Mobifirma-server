@@ -7,8 +7,6 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
 import java.security.Signature;
 
@@ -139,7 +137,12 @@ public class MsgSSLServerSocket {
 
 							JSONObject jsonObject = new JSONObject(json);
 							String clientId = jsonObject.getString("clientId");
-							Signature sg = Signature.getInstance("SHA256withRSA");
+							Signature sg = null;
+							try {
+								sg = Signature.getInstance("SHA256withRSA");
+							} catch (Exception e) {
+								System.err.println("Error: " + e.getMessage());
+							}
 							String signature = jsonObject.getString("signature");
 							String message = jsonObject.getString("message");
 
@@ -154,11 +157,31 @@ public class MsgSSLServerSocket {
 
 							String strPublicKey = threadStatement.executeQuery("SELECT public_key FROM USERS WHERE id = " + clientId).getString("public_key");
 
-							PublicKey publicKey = getPublicKeyFromString(strPublicKey);
-							sg.initVerify(publicKey);
-							sg.update(message.getBytes());
+							PublicKey publicKey = null;
+							try {
+								publicKey = getPublicKeyFromString(strPublicKey);
+							} catch (Exception e) {
+								System.err.println("Error: " + e.getMessage());
+							}
+							try {
+								sg.initVerify(publicKey);
+							} catch (Exception e) {
+								System.err.println("Error: " + e.getMessage());
+							}
+							
+							try {
+								sg.update(message.getBytes());
+							} catch (Exception e) {
+								System.err.println("Error: " + e.getMessage());
+							}
 
-							if (!sg.verify(Base64.getDecoder().decode(signature))) {
+							Boolean isVerified = false;
+							try {
+								isVerified = sg.verify(Base64.getDecoder().decode(signature));
+							} catch (Exception e) {
+								System.err.println("Error: " + e.getMessage());
+							}
+							if (!isVerified) {
 								System.out.println("Signature is not valid");
 								return;
 							}
