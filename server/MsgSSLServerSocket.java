@@ -66,7 +66,7 @@ public class MsgSSLServerSocket {
 
 			scheduler.scheduleAtFixedRate(() -> {
 				try {
-					calculateOrderSuccessRate(conn, LocalDateTime.now().getHour(), LocalDateTime.now().getMinute());
+					calculateOrderSuccessRate(conn, LocalDateTime.now().getMonthValue(), LocalDateTime.now().getYear());
 					
 				} catch (SQLException e) {
 					System.err.println("Error calculating order success rate: " + e.getMessage());
@@ -287,7 +287,7 @@ public class MsgSSLServerSocket {
 	}
 
 	private static void calculateOrderSuccessRate(Connection conn, int month, int year) throws SQLException {
-	    String totalOrdersQuery = "SELECT * FROM ORDERS WHERE strftime('%H', date) = ? AND strftime('%M', date) = ?";
+	    String totalOrdersQuery = "SELECT * FROM ORDERS WHERE strftime('%M', date) = ? AND strftime('%Y', date) = ?";
 	
 	    try (PreparedStatement totalOrdersStmt = conn.prepareStatement(totalOrdersQuery)) {
 	
@@ -321,7 +321,7 @@ public class MsgSSLServerSocket {
 
 				// Determine the symbol to write
 				String symbol;
-				if (numLines < 2) {
+				if (numLines < 2 || successRate == lastSuccessRate && successRate == secondLastSuccessRate) {
 					symbol = "0";
 				} else if (successRate > lastSuccessRate && successRate > secondLastSuccessRate) {
 					symbol = "-";
