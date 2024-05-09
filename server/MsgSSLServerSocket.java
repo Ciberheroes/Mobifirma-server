@@ -20,20 +20,35 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
-import java.util.Base64;
 import java.security.spec.X509EncodedKeySpec;
 import java.security.KeyFactory;
 
-
 public class MsgSSLServerSocket {
+	public static byte[] getBytesFromString(String cadenaStr) {
+		String cadena = cadenaStr.replace("[", "").replace("]", "").replace("\r", "");
 
-	public static PublicKey getPublicKeyFromString(String key) throws Exception {
-		byte[] byteKey = Base64.getDecoder().decode(key.getBytes());
-		X509EncodedKeySpec X509publicKey = new X509EncodedKeySpec(byteKey);
+		// Dividir la cadena por las comas y los espacios
+		String[] partes = cadena.split(", ");
+
+		// Crear un array de bytes
+		byte[] arrayBytes = new byte[partes.length];
+
+		// Convertir cada parte de la cadena a un byte y almacenarlo en el array de
+		// bytes
+		for (int i = 0; i < partes.length; i++) {
+			arrayBytes[i] = Byte.parseByte(partes[i]);
+		}
+		return arrayBytes;
+	}
+
+	public static PublicKey getPublicKeyFromString(String cadena) throws Exception {
+
+		byte[] arrayBytes = getBytesFromString(cadena);
+		X509EncodedKeySpec X509publicKey = new X509EncodedKeySpec(arrayBytes);
 		KeyFactory kf = KeyFactory.getInstance("RSA");
 
-    return kf.generatePublic(X509publicKey);
-}
+		return kf.generatePublic(X509publicKey);
+	}
 
 	/**
 	 * @param args
@@ -136,6 +151,7 @@ public class MsgSSLServerSocket {
 							String json = input.readLine();
 
 							JSONObject jsonObject = new JSONObject(json);
+							System.out.println(jsonObject.toString());
 							String clientId = jsonObject.getString("clientId");
 							Signature sg = null;
 							try {
@@ -144,9 +160,8 @@ public class MsgSSLServerSocket {
 								System.err.println("Error: " + e.getMessage());
 							}
 							String signature = jsonObject.getString("signature");
-							String message = jsonObject.getString("message");
-
-							JSONObject messageJson = new JSONObject(message);
+							
+							JSONObject messageJson = jsonObject.getJSONObject("message");
 							Integer camas = Integer.valueOf(messageJson.getString("camas"));
 							Integer mesas = Integer.valueOf(messageJson.getString("mesas"));
 							Integer sillas = Integer.valueOf(messageJson.getString("sillas"));
@@ -170,14 +185,14 @@ public class MsgSSLServerSocket {
 							}
 							
 							try {
-								sg.update(message.getBytes());
+								sg.update(messageJson.toString().getBytes());
 							} catch (Exception e) {
 								System.err.println("Error: " + e.getMessage());
 							}
 
 							Boolean isVerified = false;
 							try {
-								isVerified = sg.verify(Base64.getDecoder().decode(signature));
+								isVerified = sg.verify(getBytesFromString(signature));
 							} catch (Exception e) {
 								System.err.println("Error: " + e.getMessage());
 							}
@@ -254,22 +269,22 @@ public class MsgSSLServerSocket {
 	}
 
 	private static void loadEnvVariables() {
-        try {
-            File file = new File(System.getProperty("user.dir")+"\\server"+"\\"+".properties");
-            FileInputStream fis = new FileInputStream(file);
-            BufferedReader br = new BufferedReader(new InputStreamReader(fis));
-            String line;
-            while ((line = br.readLine()) != null) {
-                String[] parts = line.split("=", 2);
-                if (parts.length == 2) {
-                    String key = parts[0].trim();
-                    String value = parts[1].trim();
-                    System.setProperty(key, value);
-                }
-            }
-            br.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
+		try {
+			File file = new File(System.getProperty("user.dir") + "\\server" + "\\" + ".properties");
+			FileInputStream fis = new FileInputStream(file);
+			BufferedReader br = new BufferedReader(new InputStreamReader(fis));
+			String line;
+			while ((line = br.readLine()) != null) {
+				String[] parts = line.split("=", 2);
+				if (parts.length == 2) {
+					String key = parts[0].trim();
+					String value = parts[1].trim();
+					System.setProperty(key, value);
+				}
+			}
+			br.close();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
 }
