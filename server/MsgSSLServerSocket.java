@@ -3,10 +3,14 @@ package server;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.PublicKey;
 import java.security.Signature;
 
@@ -14,12 +18,16 @@ import javax.net.ssl.*;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
 import org.json.JSONObject;
 import java.security.spec.X509EncodedKeySpec;
 import java.security.KeyFactory;
@@ -80,6 +88,9 @@ public class MsgSSLServerSocket {
 			Statement stmt = conn.createStatement();
 			stmt.setQueryTimeout(30);
 
+			String dropOrderFailedTable = "DROP TABLE IF EXISTS ORDERS_FAILED";
+			stmt.executeUpdate(dropOrderFailedTable);
+
 			String dropOrderDetailsTable = "DROP TABLE IF EXISTS ORDER_DETAILS";
 			stmt.executeUpdate(dropOrderDetailsTable);
 
@@ -118,6 +129,11 @@ public class MsgSSLServerSocket {
 					" PRIMARY KEY ( order_id, product_id)) " ;
 			stmt.executeUpdate(createOrderDetailsTable);
 
+			String createOrderFailedTable = "CREATE TABLE ORDERS_FAILED " +
+					" (id INTEGER PRIMARY KEY, " +
+					" date TIMESTAMP DEFAULT (datetime('now','localtime')))";
+			stmt.executeUpdate(createOrderFailedTable);
+
 			List<String> products = List.of("camas","mesas","sillas","sillones");
 			for (String product : products) {
 				stmt.addBatch("INSERT INTO PRODUCTS (name) VALUES ('"+product+"')");
@@ -146,7 +162,6 @@ public class MsgSSLServerSocket {
 							String json = builder.toString();
 							PrintWriter output = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()));
 							
-							System.out.println("Received: " + json);
 							JSONObject jsonObject = null;
 							try {
 								jsonObject = new JSONObject(json);
@@ -174,11 +189,26 @@ public class MsgSSLServerSocket {
 
 							Statement threadStatement = conn.createStatement();
 
+							ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+
+							long initialDelay = 0;
+
+							scheduler.scheduleAtFixedRate(() -> {
+								try {
+									calculateOrderSuccessRate(conn, LocalDateTime.now().getHour(), LocalDateTime.now().getMinute());
+									
+								} catch (SQLException e) {
+									System.err.println("Error calculating order success rate: " + e.getMessage());
+								}
+							}, initialDelay, 30, TimeUnit.DAYS);
+
 
 							String strPublicKey = threadStatement.executeQuery("SELECT public_key FROM USERS WHERE id = " + clientId).getString("public_key");
 
 							if (strPublicKey == null) {
 								System.out.println("Client not found");
+								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+								orderFailedStatement.executeUpdate();
 								output.println("Petición INCORRECTA");
 								output.flush();
 								socket.close();
@@ -211,6 +241,8 @@ public class MsgSSLServerSocket {
 							}
 							if (!isVerified) {
 								System.out.println("Signature is not valid");
+								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+								orderFailedStatement.executeUpdate();
 								output.println("Petición INCORRECTA");
 								output.flush();
 								socket.close();
@@ -219,6 +251,8 @@ public class MsgSSLServerSocket {
 
 							if (camas < 0 || mesas < 0 || sillas < 0 || sillones < 0) {
 								System.out.println("Quantity of products is not valid");
+								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+								orderFailedStatement.executeUpdate();
 								output.println("Petición INCORRECTA");
 								output.flush();
 								socket.close();
@@ -227,6 +261,8 @@ public class MsgSSLServerSocket {
 
 							if (camas > 300 || mesas > 300 || sillas > 300 || sillones > 300) {
 								System.out.println("Quantity of products is not valid");
+								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+								orderFailedStatement.executeUpdate();
 								output.println("Petición INCORRECTA");
 								output.flush();
 								socket.close();
@@ -235,6 +271,8 @@ public class MsgSSLServerSocket {
 
 							if (camas == 0 && mesas == 0 && sillas == 0 && sillones == 0) {
 								System.out.println("Quantity of products is not valid");
+								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+								orderFailedStatement.executeUpdate();
 								output.println("Petición INCORRECTA");
 								output.flush();
 								socket.close();
@@ -252,6 +290,8 @@ public class MsgSSLServerSocket {
 								LocalDateTime now = LocalDateTime.now();
 								if (lastOrder.plusHours(4).isAfter(now)) {
 									System.out.println("Last order was less than 4 hours ago");
+									PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+									orderFailedStatement.executeUpdate();
 									output.println("Petición INCORRECTA");
 									output.flush();
 									socket.close();
@@ -269,6 +309,8 @@ public class MsgSSLServerSocket {
 
 							if (orderId == -1) {
 								System.out.println("Error creating order");
+								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
+								orderFailedStatement.executeUpdate();
 								output.println("Petición INCORRECTA");
 								output.flush();
 								socket.close();
@@ -331,4 +373,52 @@ public class MsgSSLServerSocket {
 			e.printStackTrace();
 		}
 	}
+
+	private static void calculateOrderSuccessRate(Connection conn, int month, int year) throws SQLException {
+	    String totalOrdersQuery = "SELECT COUNT(*) FROM ORDERS WHERE strftime('%H', date) = ? AND strftime('%M', date) = ?";
+	    String totalOrdersFailedQuery = "SELECT COUNT(*) FROM ORDERS_FAILED WHERE strftime('%H', date) = ? AND strftime('%M', date) = ?";
+	
+	    try (PreparedStatement totalOrdersStmt = conn.prepareStatement(totalOrdersQuery);
+			PreparedStatement totalOrdersFailedStmt = conn.prepareStatement(totalOrdersFailedQuery)) {
+	
+				totalOrdersStmt.setString(1, String.format("%02d", month));
+				totalOrdersStmt.setString(2, String.valueOf(year));
+				ResultSet totalOrdersResult = totalOrdersStmt.executeQuery();
+				totalOrdersResult.next();
+				int totalOrdersSuccess = totalOrdersResult.getInt(1);
+			
+				totalOrdersFailedStmt.setString(1, String.format("%02d", month));
+				totalOrdersFailedStmt.setString(2, String.valueOf(year));
+				ResultSet totalOrdersFailedResult = totalOrdersFailedStmt.executeQuery();
+				totalOrdersFailedResult.next();
+				int totalOrdersFailed = totalOrdersFailedResult.getInt(1);
+			
+				int totalOrders = totalOrdersSuccess + totalOrdersFailed;
+			
+				double successRate =  (double) totalOrdersSuccess / totalOrders;
+
+				try (PrintWriter out = new PrintWriter(new FileWriter("informe.txt", Charset.forName("UTF-8"), true))) {
+					// Read the last two lines of the file
+					List<String> lines = Files.readAllLines(Paths.get("informe.txt"));
+					int numLines = lines.size();
+					Double lastSuccessRate = numLines > 0 ? Double.parseDouble(lines.get(numLines - 1).split(" ")[2]) : null;
+					Double secondLastSuccessRate = numLines > 1 ? Double.parseDouble(lines.get(numLines - 2).split(" ")[2]) : null;
+
+					// Determine the symbol to write
+					String symbol;
+					if (numLines < 2) {
+						symbol = "0";
+					} else if (successRate > lastSuccessRate && successRate > secondLastSuccessRate) {
+						symbol = "-";
+					} else {
+						symbol = "+";
+					}
+
+					out.println(month + " " + year + " " + successRate + " " + symbol);
+				} catch (IOException e) {
+					System.err.println("Error writing to file: " + e.getMessage());
+				}
+	    }
+	}
+
 }
