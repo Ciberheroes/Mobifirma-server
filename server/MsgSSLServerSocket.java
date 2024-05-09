@@ -308,17 +308,20 @@ public class MsgSSLServerSocket {
 
 			int totalOrders = totalOrdersSuccess + totalOrdersFailed;
 			double successRate = 0.0;
+			System.err.println("Total orders: " + totalOrders);
 			if (totalOrders != 0) {
+				System.err.println("Total orders: " + totalOrders);
 				successRate = (double) totalOrdersSuccess / totalOrders;
 			}
 
 			try (PrintWriter out = new PrintWriter(new FileWriter("informe.txt", Charset.forName("UTF-8"), true))) {
 				// Read the last two lines of the file
 				List<String> lines = Files.readAllLines(Paths.get("informe.txt"));
+				lines.removeIf(x->x.isBlank());
 				int numLines = lines.size();
 				Double lastSuccessRate = numLines > 0 ? Double.parseDouble(lines.get(numLines - 1).split(" ")[2]) : null;
 				Double secondLastSuccessRate = numLines > 1 ? Double.parseDouble(lines.get(numLines - 2).split(" ")[2]) : null;
-
+				//System.err.println(month + " " + year + " " + successRate + " ");
 				// Determine the symbol to write
 				String symbol;
 				if (numLines < 2 || successRate == lastSuccessRate && successRate == secondLastSuccessRate) {
@@ -328,7 +331,6 @@ public class MsgSSLServerSocket {
 				} else {
 					symbol = "+";
 				}
-
 				out.println(month + " " + year + " " + successRate + " " + symbol);
 			} catch (IOException e) {
 				System.err.println("Error writing to file: " + e.getMessage());
