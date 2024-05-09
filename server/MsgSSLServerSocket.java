@@ -16,28 +16,30 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
 import java.security.spec.X509EncodedKeySpec;
 import java.security.KeyFactory;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.text.SimpleDateFormat;
 
 public class MsgSSLServerSocket {
 	public static byte[] getBytesFromString(String cadenaStr) {
 		String cadena = cadenaStr.replace("[", "").replace("]", "").replace("\r", "");
 
-		// Dividir la cadena por las comas y los espacios
 		String[] partes = cadena.split(", ");
 
-		// Crear un array de bytes
 		byte[] arrayBytes = new byte[partes.length];
 
-		// Convertir cada parte de la cadena a un byte y almacenarlo en el array de
-		// bytes
 		for (int i = 0; i < partes.length; i++) {
 			arrayBytes[i] = Byte.parseByte(partes[i]);
 		}
+
 		return arrayBytes;
 	}
 
@@ -103,6 +105,7 @@ public class MsgSSLServerSocket {
 			String createOrdersTable = "CREATE TABLE ORDERS " +
 					"(id INTEGER PRIMARY KEY, " +
 					" user_id INTEGER, " +
+					" date TIMESTAMP DEFAULT (datetime('now','localtime')), " +
 					" FOREIGN KEY (user_id) REFERENCES USERS(id)) ";
 			stmt.executeUpdate(createOrdersTable);
 
@@ -123,20 +126,6 @@ public class MsgSSLServerSocket {
 
 			String createUser = "INSERT INTO USERS (public_key) VALUES ('" + CLIENT_PUBLIC_KEY + "')";
 			stmt.executeUpdate(createUser);
-
-			String createOrder = "INSERT INTO ORDERS (user_id) VALUES (1)";
-			stmt.executeUpdate(createOrder);
-			
-			String createOrderDetails = "INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES (1, 1, 1)";
-			String createOrderDetails2 = "INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES (1, 2, 2)";
-			String createOrderDetails3 = "INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES (1, 3, 1)";
-			String createOrderDetails4 = "INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES (1, 4, 3)";
-
-			stmt.addBatch(createOrderDetails);
-			stmt.addBatch(createOrderDetails2);
-			stmt.addBatch(createOrderDetails3);
-			stmt.addBatch(createOrderDetails4);
-			stmt.executeBatch();
 			
 			System.out.println("Created tables in given database...");
 
@@ -148,10 +137,25 @@ public class MsgSSLServerSocket {
 					threadPool.execute(() -> {
 						try {
 							BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-							String json = input.readLine();
-
-							JSONObject jsonObject = new JSONObject(json);
-							System.out.println(jsonObject.toString());
+							StringBuilder builder = new StringBuilder();
+							String line;
+							while ((line = input.readLine()) != null) {
+								builder.append(line);
+								builder.append(System.lineSeparator());
+							}
+							String json = builder.toString();
+							PrintWriter output = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()));
+							
+							System.out.println("Received: " + json);
+							JSONObject jsonObject = null;
+							try {
+								jsonObject = new JSONObject(json);
+							} catch (Exception e) {
+								System.err.println("Error: " + e.getMessage());
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
+							}
 							String clientId = jsonObject.getString("clientId");
 							Signature sg = null;
 							try {
@@ -161,7 +165,8 @@ public class MsgSSLServerSocket {
 							}
 							String signature = jsonObject.getString("signature");
 							
-							JSONObject messageJson = jsonObject.getJSONObject("message");
+							String messageJsonString = jsonObject.getString("message");
+							JSONObject messageJson = new JSONObject(messageJsonString);
 							Integer camas = Integer.valueOf(messageJson.getString("camas"));
 							Integer mesas = Integer.valueOf(messageJson.getString("mesas"));
 							Integer sillas = Integer.valueOf(messageJson.getString("sillas"));
@@ -171,6 +176,14 @@ public class MsgSSLServerSocket {
 
 
 							String strPublicKey = threadStatement.executeQuery("SELECT public_key FROM USERS WHERE id = " + clientId).getString("public_key");
+
+							if (strPublicKey == null) {
+								System.out.println("Client not found");
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
+								return;
+							}
 
 							PublicKey publicKey = null;
 							try {
@@ -185,7 +198,7 @@ public class MsgSSLServerSocket {
 							}
 							
 							try {
-								sg.update(messageJson.toString().getBytes());
+								sg.update(messageJsonString.getBytes());
 							} catch (Exception e) {
 								System.err.println("Error: " + e.getMessage());
 							}
@@ -198,24 +211,53 @@ public class MsgSSLServerSocket {
 							}
 							if (!isVerified) {
 								System.out.println("Signature is not valid");
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
 								return;
 							}
 
 							if (camas < 0 || mesas < 0 || sillas < 0 || sillones < 0) {
 								System.out.println("Quantity of products is not valid");
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
 								return;
 							}
 
 							if (camas > 300 || mesas > 300 || sillas > 300 || sillones > 300) {
 								System.out.println("Quantity of products is not valid");
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
 								return;
 							}
 
 							if (camas == 0 && mesas == 0 && sillas == 0 && sillones == 0) {
 								System.out.println("Quantity of products is not valid");
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
 								return;
 							}
 
+							// Si el último pedido del cliente fue hace menos de 4 horas, rechazar el pedido
+							String lastDateStr = threadStatement.executeQuery("SELECT date FROM ORDERS WHERE user_id = " + clientId + " ORDER BY date DESC LIMIT 1").getString("date");
+							if (lastDateStr == null) {
+								System.out.println("Client has no orders");
+							} else {
+								// 2024-05-09 11:29:18
+								DateTimeFormatter formatter = new DateTimeFormatterBuilder().appendPattern("yyyy-MM-dd HH:mm:ss").toFormatter();
+								LocalDateTime lastOrder = LocalDateTime.parse(lastDateStr, formatter);
+								LocalDateTime now = LocalDateTime.now();
+								if (lastOrder.plusHours(4).isAfter(now)) {
+									System.out.println("Last order was less than 4 hours ago");
+									output.println("Petición INCORRECTA");
+									output.flush();
+									socket.close();
+									return;
+								}
+							}
 							PreparedStatement orderStatement = conn.prepareStatement("INSERT INTO ORDERS (user_id) VALUES ("+clientId+")", Statement.RETURN_GENERATED_KEYS);
 							orderStatement.executeUpdate();
 							int orderId = -1;
@@ -227,6 +269,9 @@ public class MsgSSLServerSocket {
 
 							if (orderId == -1) {
 								System.out.println("Error creating order");
+								output.println("Petición INCORRECTA");
+								output.flush();
+								socket.close();
 								return;
 							}
 
@@ -250,8 +295,7 @@ public class MsgSSLServerSocket {
 								orderDetailsStatement.executeUpdate();
 							}
 
-							PrintWriter output = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()));
-							output.println("Order created");
+							output.println("Petición OK");
 							output.flush();
 							socket.close();
 
