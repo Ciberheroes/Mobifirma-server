@@ -307,8 +307,10 @@ public class MsgSSLServerSocket {
 			}
 
 			int totalOrders = totalOrdersSuccess + totalOrdersFailed;
-		
-			double successRate =  (double) totalOrdersSuccess / totalOrders;
+			double successRate = 0.0;
+			if (totalOrders != 0) {
+				successRate = (double) totalOrdersSuccess / totalOrders;
+			}
 
 			try (PrintWriter out = new PrintWriter(new FileWriter("informe.txt", Charset.forName("UTF-8"), true))) {
 				// Read the last two lines of the file
