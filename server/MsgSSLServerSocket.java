@@ -21,7 +21,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,32 +33,8 @@ import java.security.KeyFactory;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
-import java.text.SimpleDateFormat;
 
 public class MsgSSLServerSocket {
-	public static byte[] getBytesFromString(String cadenaStr) {
-		String cadena = cadenaStr.replace("[", "").replace("]", "").replace("\r", "");
-
-		String[] partes = cadena.split(", ");
-
-		byte[] arrayBytes = new byte[partes.length];
-
-		for (int i = 0; i < partes.length; i++) {
-			arrayBytes[i] = Byte.parseByte(partes[i]);
-		}
-
-		return arrayBytes;
-	}
-
-	public static PublicKey getPublicKeyFromString(String cadena) throws Exception {
-
-		byte[] arrayBytes = getBytesFromString(cadena);
-		X509EncodedKeySpec X509publicKey = new X509EncodedKeySpec(arrayBytes);
-		KeyFactory kf = KeyFactory.getInstance("RSA");
-
-		return kf.generatePublic(X509publicKey);
-	}
-
 	/**
 	 * @param args
 	 * @throws IOException
@@ -83,101 +58,38 @@ public class MsgSSLServerSocket {
 
 			System.out.println("Connecting to database...");
 			final Connection conn = DriverManager.getConnection(DB_URL);
-
-			System.out.println("Creating tables in given database...");
-			Statement stmt = conn.createStatement();
-			stmt.setQueryTimeout(30);
-
-			String dropOrderFailedTable = "DROP TABLE IF EXISTS ORDERS_FAILED";
-			stmt.executeUpdate(dropOrderFailedTable);
-
-			String dropOrderDetailsTable = "DROP TABLE IF EXISTS ORDER_DETAILS";
-			stmt.executeUpdate(dropOrderDetailsTable);
-
-			String dropOrdersTable = "DROP TABLE IF EXISTS ORDERS";
-			stmt.executeUpdate(dropOrdersTable);
-
-			String dropUsersTable = "DROP TABLE IF EXISTS USERS";
-			stmt.executeUpdate(dropUsersTable);
-
-			String dropProductsTable = "DROP TABLE IF EXISTS PRODUCTS";
-			stmt.executeUpdate(dropProductsTable);
-
-			String createProductsTable = "CREATE TABLE PRODUCTS " +
-					"(id INTEGER PRIMARY KEY, " +
-					" name VARCHAR(255))";
-			stmt.executeUpdate(createProductsTable);
-
-			String createUsersTable = "CREATE TABLE USERS " +
-					"(id INTEGER PRIMARY KEY, " + 
-					" public_key VARCHAR(1024)) ";
-			stmt.executeUpdate(createUsersTable);
-
-			String createOrdersTable = "CREATE TABLE ORDERS " +
-					"(id INTEGER PRIMARY KEY, " +
-					" user_id INTEGER, " +
-					" date TIMESTAMP DEFAULT (datetime('now','localtime')), " +
-					" FOREIGN KEY (user_id) REFERENCES USERS(id)) ";
-			stmt.executeUpdate(createOrdersTable);
-
-			String createOrderDetailsTable = "CREATE TABLE ORDER_DETAILS " +
-					" (order_id INTEGER, " +
-					" product_id INTEGER, " +
-					" quantity INTEGER, " +
-					" FOREIGN KEY (order_id) REFERENCES ORDERS(id), " +
-					" FOREIGN KEY (product_id) REFERENCES PRODUCTS(id)," +
-					" PRIMARY KEY ( order_id, product_id)) " ;
-			stmt.executeUpdate(createOrderDetailsTable);
-
-			String createOrderFailedTable = "CREATE TABLE ORDERS_FAILED " +
-					" (id INTEGER PRIMARY KEY, " +
-					" date TIMESTAMP DEFAULT (datetime('now','localtime')))";
-			stmt.executeUpdate(createOrderFailedTable);
-
-			List<String> products = List.of("camas","mesas","sillas","sillones");
-			for (String product : products) {
-				stmt.addBatch("INSERT INTO PRODUCTS (name) VALUES ('"+product+"')");
-			}
-			stmt.executeBatch();
-
-			String createUser = "INSERT INTO USERS (public_key) VALUES ('" + CLIENT_PUBLIC_KEY + "')";
-			stmt.executeUpdate(createUser);
-			
-			System.out.println("Created tables in given database...");
+			populateDb(conn, CLIENT_PUBLIC_KEY);
 
 			System.err.println("Waiting for connection...");
 			ExecutorService threadPool = Executors.newFixedThreadPool(8);
+			ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+
+			scheduler.scheduleAtFixedRate(() -> {
+				try {
+					calculateOrderSuccessRate(conn, LocalDateTime.now().getHour(), LocalDateTime.now().getMinute());
+					
+				} catch (SQLException e) {
+					System.err.println("Error calculating order success rate: " + e.getMessage());
+				}
+			}, 0, 30, TimeUnit.DAYS);
+
 			while (true) {
 				try {
 					final SSLSocket socket = (SSLSocket) serverSocket.accept();
 					threadPool.execute(() -> {
-						try {
-							BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-							StringBuilder builder = new StringBuilder();
-							String line;
-							while ((line = input.readLine()) != null) {
-								builder.append(line);
-								builder.append(System.lineSeparator());
-							}
-							String json = builder.toString();
-							PrintWriter output = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()));
-							
+						try (BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+						PrintWriter output = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()))) {
+
+							String json = input.readLine();
 							JSONObject jsonObject = null;
 							try {
 								jsonObject = new JSONObject(json);
 							} catch (Exception e) {
 								System.err.println("Error: " + e.getMessage());
 								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
 							}
 							String clientId = jsonObject.getString("clientId");
-							Signature sg = null;
-							try {
-								sg = Signature.getInstance("SHA256withRSA");
-							} catch (Exception e) {
-								System.err.println("Error: " + e.getMessage());
-							}
+							
 							String signature = jsonObject.getString("signature");
 							
 							String messageJsonString = jsonObject.getString("message");
@@ -189,160 +101,65 @@ public class MsgSSLServerSocket {
 
 							Statement threadStatement = conn.createStatement();
 
-							ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+							boolean verified = true;
 
-							long initialDelay = 0;
-
-							scheduler.scheduleAtFixedRate(() -> {
-								try {
-									calculateOrderSuccessRate(conn, LocalDateTime.now().getHour(), LocalDateTime.now().getMinute());
-									
-								} catch (SQLException e) {
-									System.err.println("Error calculating order success rate: " + e.getMessage());
-								}
-							}, initialDelay, 30, TimeUnit.DAYS);
-
-
-							String strPublicKey = threadStatement.executeQuery("SELECT public_key FROM USERS WHERE id = " + clientId).getString("public_key");
+							String strPublicKey = threadStatement.executeQuery("SELECT public_key FROM USERS WHERE id = '" + clientId +"'").getString("public_key");
 
 							if (strPublicKey == null) {
 								System.out.println("Client not found");
-								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-								orderFailedStatement.executeUpdate();
+								verified = false;
 								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
-								return;
-							}
-
-							PublicKey publicKey = null;
-							try {
-								publicKey = getPublicKeyFromString(strPublicKey);
-							} catch (Exception e) {
-								System.err.println("Error: " + e.getMessage());
-							}
-							try {
-								sg.initVerify(publicKey);
-							} catch (Exception e) {
-								System.err.println("Error: " + e.getMessage());
-							}
-							
-							try {
-								sg.update(messageJsonString.getBytes());
-							} catch (Exception e) {
-								System.err.println("Error: " + e.getMessage());
-							}
-
-							Boolean isVerified = false;
-							try {
-								isVerified = sg.verify(getBytesFromString(signature));
-							} catch (Exception e) {
-								System.err.println("Error: " + e.getMessage());
-							}
-							if (!isVerified) {
+							} 
+							if (verified && !verifySignature(strPublicKey, signature, messageJsonString)){
 								System.out.println("Signature is not valid");
-								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-								orderFailedStatement.executeUpdate();
+								verified = false;
 								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
-								return;
 							}
-
-							if (camas < 0 || mesas < 0 || sillas < 0 || sillones < 0) {
+							if (verified && (camas == 0 && mesas == 0 && sillas == 0 && sillones == 0) || 
+								(camas < 0 || mesas < 0 || sillas < 0 || sillones < 0) || 
+								(camas > 300 || mesas > 300 || sillas > 300 || sillones > 300)) {
 								System.out.println("Quantity of products is not valid");
-								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-								orderFailedStatement.executeUpdate();
+								verified = false;
 								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
-								return;
+							}
+							if (verified) {
+								// Si el último pedido del cliente fue hace menos de 4 horas, rechazar el pedido
+								String lastDateStr = threadStatement.executeQuery("SELECT date FROM ORDERS WHERE user_id = " + clientId + " ORDER BY date DESC LIMIT 1 OFFSET 2").getString("date");
+								if (!(lastDateStr == null)) {
+									// 2024-05-09 11:29:18
+									DateTimeFormatter formatter = new DateTimeFormatterBuilder().appendPattern("yyyy-MM-dd HH:mm:ss").toFormatter();
+									LocalDateTime lastOrder = LocalDateTime.parse(lastDateStr, formatter);
+									LocalDateTime now = LocalDateTime.now();
+									if (lastOrder.plusHours(4).isAfter(now)) {
+										System.out.println("Last order was less than 4 hours ago");
+										verified = false;
+										output.println("Petición INCORRECTA");
+									}else{
+										output.println("Petición OK");
+									}
+								}else{
+									output.println("Petición OK");
+								}	
 							}
 
-							if (camas > 300 || mesas > 300 || sillas > 300 || sillones > 300) {
-								System.out.println("Quantity of products is not valid");
-								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-								orderFailedStatement.executeUpdate();
-								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
-								return;
-							}
-
-							if (camas == 0 && mesas == 0 && sillas == 0 && sillones == 0) {
-								System.out.println("Quantity of products is not valid");
-								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-								orderFailedStatement.executeUpdate();
-								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
-								return;
-							}
-
-							// Si el último pedido del cliente fue hace menos de 4 horas, rechazar el pedido
-							String lastDateStr = threadStatement.executeQuery("SELECT date FROM ORDERS WHERE user_id = " + clientId + " ORDER BY date DESC LIMIT 1").getString("date");
-							if (lastDateStr == null) {
-								System.out.println("Client has no orders");
-							} else {
-								// 2024-05-09 11:29:18
-								DateTimeFormatter formatter = new DateTimeFormatterBuilder().appendPattern("yyyy-MM-dd HH:mm:ss").toFormatter();
-								LocalDateTime lastOrder = LocalDateTime.parse(lastDateStr, formatter);
-								LocalDateTime now = LocalDateTime.now();
-								if (lastOrder.plusHours(4).isAfter(now)) {
-									System.out.println("Last order was less than 4 hours ago");
-									PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-									orderFailedStatement.executeUpdate();
-									output.println("Petición INCORRECTA");
-									output.flush();
-									socket.close();
-									return;
-								}
-							}
-							PreparedStatement orderStatement = conn.prepareStatement("INSERT INTO ORDERS (user_id) VALUES ("+clientId+")", Statement.RETURN_GENERATED_KEYS);
-							orderStatement.executeUpdate();
-							int orderId = -1;
-							try (java.sql.ResultSet generatedKeys = orderStatement.getGeneratedKeys()) {
-								if (generatedKeys.next()) {
-									orderId = generatedKeys.getInt(1);
-								}
-							}
-
-							if (orderId == -1) {
-								System.out.println("Error creating order");
-								PreparedStatement orderFailedStatement = conn.prepareStatement("INSERT INTO ORDERS_FAILED DEFAULT VALUES", Statement.RETURN_GENERATED_KEYS);
-								orderFailedStatement.executeUpdate();
-								output.println("Petición INCORRECTA");
-								output.flush();
-								socket.close();
-								return;
-							}
-
-							if (camas > 0) {
-								PreparedStatement orderDetailsStatement = conn.prepareStatement("INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES ("+orderId+", 1, "+camas+")");
-								orderDetailsStatement.executeUpdate();
-							}
-
-							if (mesas > 0) {
-								PreparedStatement orderDetailsStatement = conn.prepareStatement("INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES ("+orderId+", 2, "+mesas+")");
-								orderDetailsStatement.executeUpdate();
-							}
-
-							if (sillas > 0) {
-								PreparedStatement orderDetailsStatement = conn.prepareStatement("INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES ("+orderId+", 3, "+sillas+")");
-								orderDetailsStatement.executeUpdate();
-							}
-
-							if (sillones > 0) {
-								PreparedStatement orderDetailsStatement = conn.prepareStatement("INSERT INTO ORDER_DETAILS (order_id, product_id, quantity) VALUES ("+orderId+", 4, "+sillones+")");
-								orderDetailsStatement.executeUpdate();
-							}
-
-							output.println("Petición OK");
-							output.flush();
-							socket.close();
+							PreparedStatement preparedStatement = conn.prepareStatement("INSERT INTO ORDERS (user_id, camas, mesas, sillas, sillones, verificado) VALUES (?, ?, ?, ?, ?, ?)");
+							preparedStatement.setString(1, clientId);
+							preparedStatement.setInt(2, camas);
+							preparedStatement.setInt(3, mesas); 
+							preparedStatement.setInt(4, sillas);
+							preparedStatement.setInt(5, sillones);
+							preparedStatement.setBoolean(6, verified);
+							preparedStatement.executeUpdate();
+							System.out.println("Order created");
 
 						} catch (IOException | SQLException e) {
 							System.err.println("Error: " + e.getMessage());
+						}finally {
+							try {
+								socket.close();
+							} catch (IOException e) {
+								System.err.println("Error: " + e.getMessage());
+							}
 						}
 					});
 				} catch (IOException e) {
@@ -374,51 +191,146 @@ public class MsgSSLServerSocket {
 		}
 	}
 
-	private static void calculateOrderSuccessRate(Connection conn, int month, int year) throws SQLException {
-	    String totalOrdersQuery = "SELECT COUNT(*) FROM ORDERS WHERE strftime('%H', date) = ? AND strftime('%M', date) = ?";
-	    String totalOrdersFailedQuery = "SELECT COUNT(*) FROM ORDERS_FAILED WHERE strftime('%H', date) = ? AND strftime('%M', date) = ?";
-	
-	    try (PreparedStatement totalOrdersStmt = conn.prepareStatement(totalOrdersQuery);
-			PreparedStatement totalOrdersFailedStmt = conn.prepareStatement(totalOrdersFailedQuery)) {
-	
-				totalOrdersStmt.setString(1, String.format("%02d", month));
-				totalOrdersStmt.setString(2, String.valueOf(year));
-				ResultSet totalOrdersResult = totalOrdersStmt.executeQuery();
-				totalOrdersResult.next();
-				int totalOrdersSuccess = totalOrdersResult.getInt(1);
-			
-				totalOrdersFailedStmt.setString(1, String.format("%02d", month));
-				totalOrdersFailedStmt.setString(2, String.valueOf(year));
-				ResultSet totalOrdersFailedResult = totalOrdersFailedStmt.executeQuery();
-				totalOrdersFailedResult.next();
-				int totalOrdersFailed = totalOrdersFailedResult.getInt(1);
-			
-				int totalOrders = totalOrdersSuccess + totalOrdersFailed;
-			
-				double successRate =  (double) totalOrdersSuccess / totalOrders;
+	public static byte[] getBytesFromString(String cadenaStr) {
+		String cadena = cadenaStr.replace("[", "").replace("]", "").replace("\r", "");
 
-				try (PrintWriter out = new PrintWriter(new FileWriter("informe.txt", Charset.forName("UTF-8"), true))) {
-					// Read the last two lines of the file
-					List<String> lines = Files.readAllLines(Paths.get("informe.txt"));
-					int numLines = lines.size();
-					Double lastSuccessRate = numLines > 0 ? Double.parseDouble(lines.get(numLines - 1).split(" ")[2]) : null;
-					Double secondLastSuccessRate = numLines > 1 ? Double.parseDouble(lines.get(numLines - 2).split(" ")[2]) : null;
+		String[] partes = cadena.split(", ");
 
-					// Determine the symbol to write
-					String symbol;
-					if (numLines < 2) {
-						symbol = "0";
-					} else if (successRate > lastSuccessRate && successRate > secondLastSuccessRate) {
-						symbol = "-";
-					} else {
-						symbol = "+";
-					}
+		byte[] arrayBytes = new byte[partes.length];
 
-					out.println(month + " " + year + " " + successRate + " " + symbol);
-				} catch (IOException e) {
-					System.err.println("Error writing to file: " + e.getMessage());
-				}
-	    }
+		for (int i = 0; i < partes.length; i++) {
+			arrayBytes[i] = Byte.parseByte(partes[i]);
+		}
+
+		return arrayBytes;
 	}
 
+	public static PublicKey getPublicKeyFromString(String cadena) throws Exception {
+
+		byte[] arrayBytes = getBytesFromString(cadena);
+		X509EncodedKeySpec X509publicKey = new X509EncodedKeySpec(arrayBytes);
+		KeyFactory kf = KeyFactory.getInstance("RSA");
+
+		return kf.generatePublic(X509publicKey);
+	}
+
+	private static void populateDb(Connection conn, String CLIENT_PUBLIC_KEY) throws SQLException{
+
+		System.out.println("Creating tables in given database...");
+		Statement stmt = conn.createStatement();
+		stmt.setQueryTimeout(30);
+
+		
+		stmt.addBatch("DROP TABLE IF EXISTS ORDERS");
+		
+		
+		stmt.addBatch("DROP TABLE IF EXISTS USERS");
+
+
+		stmt.addBatch("CREATE TABLE USERS " +
+				"(id STRING PRIMARY KEY, " + 
+				" public_key VARCHAR(1024)) ");
+
+		stmt.addBatch("CREATE TABLE ORDERS " +
+				"(id INTEGER PRIMARY KEY, " +
+				" user_id STRING, " +
+				" date TIMESTAMP DEFAULT (datetime('now','localtime')), " +
+				" camas INTEGER, " +
+				" mesas INTEGER, " +
+				" sillas INTEGER, " +
+				" sillones INTEGER, " +
+				" verificado BOOLEAN, " +
+				" FOREIGN KEY (user_id) REFERENCES USERS(id)) ");
+
+		
+
+		stmt.addBatch("INSERT INTO USERS (id, public_key) VALUES ('1','" + CLIENT_PUBLIC_KEY + "')");
+
+		stmt.executeBatch();
+		System.out.println("Created tables in given database...");
+	
+
+	}
+
+	private static boolean verifySignature(String strPublicKey, String signature, String messageJsonString){
+		Signature sg = null;
+		try {
+			sg = Signature.getInstance("SHA256withRSA");
+		} catch (Exception e) {
+			System.err.println("Error: " + e.getMessage());
+		}
+		
+		PublicKey publicKey = null;
+		try {
+			publicKey = getPublicKeyFromString(strPublicKey);
+		} catch (Exception e) {
+			System.err.println("Error: " + e.getMessage());
+		}
+		try {
+			sg.initVerify(publicKey);
+		} catch (Exception e) {
+			System.err.println("Error: " + e.getMessage());
+		}
+		
+		try {
+			sg.update(messageJsonString.getBytes());
+		} catch (Exception e) {
+			System.err.println("Error: " + e.getMessage());
+		}
+
+		try {
+			return sg.verify(getBytesFromString(signature));
+		} catch (Exception e) {
+			System.err.println("Error: " + e.getMessage());
+			return false;
+		}
+	}
+
+	private static void calculateOrderSuccessRate(Connection conn, int month, int year) throws SQLException {
+	    String totalOrdersQuery = "SELECT * FROM ORDERS WHERE strftime('%H', date) = ? AND strftime('%M', date) = ?";
+	
+	    try (PreparedStatement totalOrdersStmt = conn.prepareStatement(totalOrdersQuery)) {
+	
+			totalOrdersStmt.setString(1, String.format("%02d", month));
+			totalOrdersStmt.setString(2, String.valueOf(year));
+			ResultSet totalOrdersResult = totalOrdersStmt.executeQuery();
+			
+			int totalOrdersSuccess = 0;
+			int totalOrdersFailed = 0;
+
+			while (totalOrdersResult.next()) {
+				if(totalOrdersResult.getBoolean("verified")) {
+					totalOrdersSuccess++;
+				} else {
+					totalOrdersFailed++;
+				}
+			}
+
+			int totalOrders = totalOrdersSuccess + totalOrdersFailed;
+		
+			double successRate =  (double) totalOrdersSuccess / totalOrders;
+
+			try (PrintWriter out = new PrintWriter(new FileWriter("informe.txt", Charset.forName("UTF-8"), true))) {
+				// Read the last two lines of the file
+				List<String> lines = Files.readAllLines(Paths.get("informe.txt"));
+				int numLines = lines.size();
+				Double lastSuccessRate = numLines > 0 ? Double.parseDouble(lines.get(numLines - 1).split(" ")[2]) : null;
+				Double secondLastSuccessRate = numLines > 1 ? Double.parseDouble(lines.get(numLines - 2).split(" ")[2]) : null;
+
+				// Determine the symbol to write
+				String symbol;
+				if (numLines < 2) {
+					symbol = "0";
+				} else if (successRate > lastSuccessRate && successRate > secondLastSuccessRate) {
+					symbol = "-";
+				} else {
+					symbol = "+";
+				}
+
+				out.println(month + " " + year + " " + successRate + " " + symbol);
+			} catch (IOException e) {
+				System.err.println("Error writing to file: " + e.getMessage());
+			}
+	    }
+	}
 }
